@@ -33,7 +33,7 @@ from PIL import Image
 from static_ffmpeg import run
 from pynput.mouse import Controller
 
-VERSION = "0.1.0"
+VERSION = "0.1.2"
 
 
 class ScreenTimelapseApp(tk.Frame):
@@ -52,9 +52,9 @@ class ScreenTimelapseApp(tk.Frame):
 		self.outputFPS = None
 		self.outFPSText = None
 		self.capturedFrames = None
-		self.capturing = False
 		self.regionData = {"top": 0, "left": 0, "width": 0, "height": 0}
 		self.captureThread = None
+		self.stopEvent = threading.Event()
 		self.directory = None
 
 		self.create_widgets()
@@ -104,8 +104,6 @@ class ScreenTimelapseApp(tk.Frame):
 			nonlocal x1, y1
 			if not resizing:
 				x1, y1 = event.x, event.y
-			else:
-				x1, y1 = mouse.position
 
 		def on_move(event):
 			nonlocal x1, y1, x2, y2, resizing, left, top, right, bottom
@@ -113,27 +111,27 @@ class ScreenTimelapseApp(tk.Frame):
 			# If not resizing, get mouse position to reposition fakeRoot
 			if not resizing:
 				mX, mY = mouse.position
-				fakeRoot.geometry(f"+{mX-x1}+{mY-y1}")
-				left = mX-x1
-				top = mY-y1
+				fakeRoot.geometry(f"+{mX - x1}+{mY - y1}")
+				left = mX - x1
+				top = mY - y1
 			else:
-				# Otherwise, resize fakeRoot, minimum is 100x100
+				# Otherwise, resize fakeRoot, minimum is 200x200
 				x2, y2 = mouse.position
-				width = max(x2-x1, 100)
-				height = max(y2-y1, 100)
-				fakeRoot.geometry(f"{width}x{height}+{x1}+{y1}")
-				right = x1+width
-				bottom = y1+height
+				width = max(200, x2 - left)
+				height = max(200, y2 - top)
+				fakeRoot.geometry(f"{width}x{height}+{left}+{top}")
+				right = left + width
+				bottom = top + height
 
 		def finish():
-			nonlocal x1, y1, x2, y2, resizing, left, top, right, bottom
+			nonlocal x1, y1, x2, y2, left, top, right, bottom
 			# Save region data
 			self.regionData["left"] = left
 			self.regionData["top"] = top
 
 			# Width and height must be divisible by 2
-			self.regionData["width"] = (right-left) // 2 * 2
-			self.regionData["height"] = (bottom-top) // 2 * 2
+			self.regionData["width"] = (right - left) // 2 * 2
+			self.regionData["height"] = (bottom - top) // 2 * 2
 
 			print(f"Region set to {self.regionData}")
 
@@ -162,7 +160,12 @@ class ScreenTimelapseApp(tk.Frame):
 		# Move to screen center
 		screenWidth = fakeRoot.winfo_screenwidth()
 		screenHeight = fakeRoot.winfo_screenheight()
-		fakeRoot.geometry(f"+{screenWidth // 2 - 100}+{screenHeight // 2 - 100}")
+
+		x1 = (screenWidth // 2) - 100
+		y1 = (screenHeight // 2) - 100
+		left = x1
+		top = y1
+		fakeRoot.geometry(f"+{left}+{top}")
 
 		# Add text at center
 		text = tk.Label(fakeRoot, text="MOVING")
@@ -182,7 +185,16 @@ class ScreenTimelapseApp(tk.Frame):
 		fakeRoot.mainloop()
 
 	def do_start(self):
-		if self.capturing or self.regionData["width"] == 0 or self.regionData["height"] == 0:
+		if self.regionData["width"] == 0 or self.regionData["height"] == 0\
+				or self.regionData["left"] == 0 or self.regionData["top"] == 0:
+			return
+
+		# If invalid inputs for seconds per frame or output FPS, return
+		targetSPF, targetFPS = 0, 0
+		try:
+			targetSPF = float(self.capSPF.get())
+			targetFPS = int(self.outputFPS.get())
+		except ValueError:
 			return
 
 		# Change startstop button to stop
@@ -203,87 +215,86 @@ class ScreenTimelapseApp(tk.Frame):
 
 		def capture_loop():
 			frame = 0
-			self.capturing = True
 			with mss() as sct:
-				while self.capturing:
+				while self.stopEvent.is_set():
 					sct_img = sct.grab(self.regionData)
 
 					# Convert to PIL Image
 					img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
 
-					# Save image (number of frame as filename)
-					img.save(self.directory / f"{frame}.png")
+					# Save image (number of frame as filename, padded with 6 zeros)
+					img.save(self.directory / f"{frame:06d}.png")
 					frame += 1
 
 					# Update capturedFrames label
 					self.capturedFrames["text"] = f"Captured frames: {frame}"
 
 					# Sleep for specified seconds per frame
-					time.sleep(int(self.capSPF.get()))
+					time.sleep(targetSPF)
 
 		# Create capture thread
 		self.captureThread = threading.Thread(target=capture_loop)
 		print("Starting capture thread")
+		self.stopEvent.set()
 		self.captureThread.start()
 
 	def do_stop(self):
 		# Stop capturing
-		if self.capturing:
-			self.capturing = False
-			self.captureThread.join()
+		self.stopEvent.clear()
+		self.captureThread.join()
 
-			# Change startstop button to start
-			self.startstop["text"] = "Start"
-			self.startstop["command"] = self.do_start
-			self.startstop["fg"] = "green"
+		# Change startstop button to start
+		self.startstop["text"] = "Start"
+		self.startstop["command"] = self.do_start
+		self.startstop["fg"] = "green"
 
-			# Enable region button
-			self.region["state"] = "normal"
+		# Enable region button
+		self.region["state"] = "normal"
 
-			# Enable spf and fps entries
-			self.capSPF["state"] = "normal"
-			self.outputFPS["state"] = "normal"
+		# Enable spf and fps entries
+		self.capSPF["state"] = "normal"
+		self.outputFPS["state"] = "normal"
 
-			# Get FFMPEG from package
-			ffmpeg, ffprobe = run.get_or_fetch_platform_executables_else_raise()
+		# Get FFMPEG from package
+		ffmpeg, ffprobe = run.get_or_fetch_platform_executables_else_raise()
 
-			# Create video from images
-			print("Creating video...")
+		# Create video from images
+		print("Creating video...")
 
-			# Get all images in directory
-			images = sorted(self.directory.glob("*.png"))
+		# Get all images in directory
+		images = sorted(self.directory.glob("*.png"))
 
-			# Create ffmpeg subprocess
-			ffmpeg_sub = subprocess.Popen(
-				[
-					ffmpeg,
-					"-y",  # Overwrite output file if it exists
-					"-framerate", str(self.outputFPS.get()),  # Set framerate
-					"-f", "image2pipe",  # Input format
-					"-i", "-",  # Input from stdin
-					"-c:v", "libx264",  # Video codec
-					"-pix_fmt", "yuv420p",  # Pixel format
-					"-movflags", "+faststart",  # Fast start
-					str(self.directory / f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.mp4")  # Output file
-				],
-				stdin=subprocess.PIPE
-			)
+		# Create ffmpeg subprocess
+		ffmpeg_sub = subprocess.Popen(
+			[
+				ffmpeg,
+				"-y",  # Overwrite output file if it exists
+				"-framerate", str(self.outputFPS.get()),  # Set framerate, validated at start
+				"-f", "image2pipe",  # Input format
+				"-i", "-",  # Input from stdin
+				"-c:v", "libx264",  # Video codec
+				"-pix_fmt", "yuv420p",  # Pixel format
+				"-movflags", "+faststart",  # Fast start
+				str(self.directory / f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.mp4")  # Output file
+			],
+			stdin=subprocess.PIPE
+		)
 
-			# Write images to ffmpeg stdin
-			for image in images:
-				with open(image, "rb") as f:
-					ffmpeg_sub.stdin.write(f.read())
+		# Write images to ffmpeg stdin
+		for image in images:
+			with open(image, "rb") as f:
+				ffmpeg_sub.stdin.write(f.read())
 
-			# Close stdin
-			ffmpeg_sub.stdin.close()
+		# Close stdin
+		ffmpeg_sub.stdin.close()
 
-			# Wait for ffmpeg to finish
-			ffmpeg_sub.wait()
+		# Wait for ffmpeg to finish
+		ffmpeg_sub.wait()
 
-			print("Done")
+		print("Done")
 
 	def on_quit(self):
-		if self.capturing:
+		if self.stopEvent.is_set():
 			self.do_stop()
 
 		self.master.destroy()
