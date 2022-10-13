@@ -25,9 +25,12 @@ import pathlib
 import datetime
 import threading
 import subprocess
+import time
+
 from mss import mss
 import tkinter as tk
 from PIL import Image
+from static_ffmpeg import run
 from pynput.mouse import Controller
 
 VERSION = "0.1.0"
@@ -41,10 +44,14 @@ class ScreenTimelapseApp(tk.Frame):
 
 		self.quit = None
 		self.region = None
-		self.start = None
+		self.startstop = None
 		self.stop = None
 		self.title = None
-		self.capFPS = None
+		self.spfText = None
+		self.capSPF = None
+		self.outputFPS = None
+		self.outFPSText = None
+		self.capturedFrames = None
 		self.capturing = False
 		self.regionData = {"top": 0, "left": 0, "width": 0, "height": 0}
 		self.captureThread = None
@@ -56,53 +63,83 @@ class ScreenTimelapseApp(tk.Frame):
 		self.title = tk.Label(self, text=f"py-screen-timelapse v{VERSION}")
 		self.title.pack(side="top")
 
-		self.quit = tk.Button(self, text="Quit", fg="red", command=self.master.destroy)
-		self.quit.pack(side="bottom")
-
 		self.region = tk.Button(self, text="Region", command=self.set_region)
-		self.region.pack(side="bottom")
+		self.region.pack(side="top")
 
-		self.start = tk.Button(self, text="Start", command=self.do_start)
-		self.start.pack(side="top")
+		self.startstop = tk.Button(self, text="Start", command=self.do_start)
+		self.startstop["fg"] = "green"
+		# Disable startstop button until region is set
+		self.startstop["state"] = "disabled"
+		self.startstop.pack(side="top")
 
-		self.stop = tk.Button(self, text="Stop", command=self.do_stop)
-		self.stop.pack(side="top")
+		self.spfText = tk.Label(self, text="Capture every n seconds:")
+		self.spfText.pack(side="top")
 
-		self.capFPS = tk.Entry(self)
-		self.capFPS.insert(0, "30")
-		self.capFPS.pack(side="top")
+		self.capSPF = tk.Entry(self)
+		self.capSPF.insert(0, "1")  # Seconds per frame
+		self.capSPF.pack(side="top")
+
+		self.outFPSText = tk.Label(self, text="Output FPS:")
+		self.outFPSText.pack(side="top")
+
+		self.outputFPS = tk.Entry(self)
+		self.outputFPS.insert(0, "60")  # Output FPS
+		self.outputFPS.pack(side="top")
+
+		self.capturedFrames = tk.Label(self, text="Captured frames: 0")
+		self.capturedFrames.pack(side="bottom")
+
+		self.quit = tk.Button(self, text="Quit", fg="red", command=self.on_quit)
+		self.quit.pack(side="bottom")
 
 	def set_region(self):
 		# Specify region by clicking and dragging a rectangle on monitor (create undecorated window)
 		x1, y1, x2, y2 = 0, 0, 0, 0
+		left, top, right, bottom = 0, 0, 0, 0
 		resizing = False
 		text = None
 		mouse = Controller()
 
 		def on_click(event):
 			nonlocal x1, y1
-			x1, y1 = event.x, event.y
+			if not resizing:
+				x1, y1 = event.x, event.y
+			else:
+				x1, y1 = mouse.position
 
 		def on_move(event):
-			nonlocal x1, y1, x2, y2, resizing
+			nonlocal x1, y1, x2, y2, resizing, left, top, right, bottom
 
 			# If not resizing, get mouse position to reposition fakeRoot
 			if not resizing:
 				mX, mY = mouse.position
-				fakeRoot.geometry(f"+{mX - x1}+{mY - y1}")
+				fakeRoot.geometry(f"+{mX-x1}+{mY-y1}")
+				left = mX-x1
+				top = mY-y1
 			else:
-				# Otherwise, resize fakeRoot
+				# Otherwise, resize fakeRoot, minimum is 100x100
 				x2, y2 = mouse.position
-				fakeRoot.geometry(f"{x2 - x1}x{y2 - y1}")
+				width = max(x2-x1, 100)
+				height = max(y2-y1, 100)
+				fakeRoot.geometry(f"{width}x{height}+{x1}+{y1}")
+				right = x1+width
+				bottom = y1+height
 
 		def finish():
-			nonlocal x1, y1, x2, y2, resizing
+			nonlocal x1, y1, x2, y2, resizing, left, top, right, bottom
 			# Save region data
-			self.regionData["left"] = x1
-			self.regionData["top"] = y1
-			self.regionData["width"] = x2 - x1
-			self.regionData["height"] = y2 - y1
+			self.regionData["left"] = left
+			self.regionData["top"] = top
+
+			# Width and height must be divisible by 2
+			self.regionData["width"] = (right-left) // 2 * 2
+			self.regionData["height"] = (bottom-top) // 2 * 2
+
 			print(f"Region set to {self.regionData}")
+
+			# Enable startstop button
+			self.startstop["state"] = "normal"
+
 			fakeRoot.destroy()
 
 		def toggle_resize_move():
@@ -148,6 +185,18 @@ class ScreenTimelapseApp(tk.Frame):
 		if self.capturing or self.regionData["width"] == 0 or self.regionData["height"] == 0:
 			return
 
+		# Change startstop button to stop
+		self.startstop["text"] = "Stop"
+		self.startstop["command"] = self.do_stop
+		self.startstop["fg"] = "red"
+
+		# Disable region button
+		self.region["state"] = "disabled"
+
+		# Disable spf and fps entries
+		self.capSPF["state"] = "disabled"
+		self.outputFPS["state"] = "disabled"
+
 		# Create new directory with current date under "./timelapses/" and start capturing
 		self.directory = pathlib.Path("timelapses") / datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 		self.directory.mkdir(parents=True, exist_ok=True)
@@ -166,6 +215,12 @@ class ScreenTimelapseApp(tk.Frame):
 					img.save(self.directory / f"{frame}.png")
 					frame += 1
 
+					# Update capturedFrames label
+					self.capturedFrames["text"] = f"Captured frames: {frame}"
+
+					# Sleep for specified seconds per frame
+					time.sleep(int(self.capSPF.get()))
+
 		# Create capture thread
 		self.captureThread = threading.Thread(target=capture_loop)
 		print("Starting capture thread")
@@ -177,14 +232,20 @@ class ScreenTimelapseApp(tk.Frame):
 			self.capturing = False
 			self.captureThread.join()
 
-			# Find ffmpeg, PATH first then in current directory
-			ffmpeg = pathlib.Path("ffmpeg")
-			# Check if ffmpeg is in PATH
-			if not ffmpeg.exists():
-				ffmpeg = pathlib.Path("ffmpeg.exe")
-			if not ffmpeg.exists():
-				print("FFMPEG not found, skipping video creation")
-				return
+			# Change startstop button to start
+			self.startstop["text"] = "Start"
+			self.startstop["command"] = self.do_start
+			self.startstop["fg"] = "green"
+
+			# Enable region button
+			self.region["state"] = "normal"
+
+			# Enable spf and fps entries
+			self.capSPF["state"] = "normal"
+			self.outputFPS["state"] = "normal"
+
+			# Get FFMPEG from package
+			ffmpeg, ffprobe = run.get_or_fetch_platform_executables_else_raise()
 
 			# Create video from images
 			print("Creating video...")
@@ -196,21 +257,36 @@ class ScreenTimelapseApp(tk.Frame):
 			ffmpeg_sub = subprocess.Popen(
 				[
 					ffmpeg,
-					"-y", # Overwrite output file if it exists
-					"-r", self.capFPS.get(), # FPS
-					"-i", str(self.directory / "%d.png"), # Input images
-					"-c:v", "libx264", # Video codec
-					"-pix_fmt", "yuv420p", # Pixel format
-					str(self.directory / f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.mp4") # Output file
+					"-y",  # Overwrite output file if it exists
+					"-framerate", str(self.outputFPS.get()),  # Set framerate
+					"-f", "image2pipe",  # Input format
+					"-i", "-",  # Input from stdin
+					"-c:v", "libx264",  # Video codec
+					"-pix_fmt", "yuv420p",  # Pixel format
+					"-movflags", "+faststart",  # Fast start
+					str(self.directory / f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.mp4")  # Output file
 				],
-				stdout=subprocess.PIPE,
-				stderr=subprocess.PIPE
+				stdin=subprocess.PIPE
 			)
+
+			# Write images to ffmpeg stdin
+			for image in images:
+				with open(image, "rb") as f:
+					ffmpeg_sub.stdin.write(f.read())
+
+			# Close stdin
+			ffmpeg_sub.stdin.close()
 
 			# Wait for ffmpeg to finish
 			ffmpeg_sub.wait()
 
 			print("Done")
+
+	def on_quit(self):
+		if self.capturing:
+			self.do_stop()
+
+		self.master.destroy()
 
 
 if __name__ == "__main__":
