@@ -19,7 +19,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-
+import math
 # This script takes screenshots of the screen and creates a timelapse pictures from them.
 import pathlib
 import datetime
@@ -27,6 +27,7 @@ import threading
 import subprocess
 import time
 
+import screeninfo
 from mss import mss
 import tkinter as tk
 from PIL import Image
@@ -92,13 +93,25 @@ class ScreenTimelapseApp(tk.Frame):
 		self.quit = tk.Button(self, text="Quit", fg="red", command=self.on_quit)
 		self.quit.pack(side="bottom")
 
+	def get_dpi(self, curPos):
+		# Find monitor that has curPos
+		for monitor in screeninfo.get_monitors():
+			if monitor.x <= curPos[0] <= monitor.x + monitor.width and monitor.y <= curPos[1] <= monitor.y + monitor.height:
+				widthInches = monitor.width_mm / 25.4
+				heightInches = monitor.height_mm / 25.4
+				return (math.hypot(monitor.width, monitor.height) / math.hypot(widthInches, heightInches)) / 1.5
+
 	def set_region(self):
 		# Specify region by clicking and dragging a rectangle on monitor (create undecorated window)
-		x1, y1, x2, y2 = 0, 0, 0, 0
+		x1, y1 = 0, 0
 		left, top, right, bottom = 0, 0, 0, 0
+		screenDPI = 0
 		resizing = False
 		text = None
 		mouse = Controller()
+
+		# Get DPI of current screen
+		screenDPI = self.get_dpi((left, top))
 
 		def on_click(event):
 			nonlocal x1, y1
@@ -106,7 +119,7 @@ class ScreenTimelapseApp(tk.Frame):
 				x1, y1 = event.x, event.y
 
 		def on_move(event):
-			nonlocal x1, y1, x2, y2, resizing, left, top, right, bottom
+			nonlocal x1, y1, resizing, left, top, right, bottom, screenDPI
 
 			# If not resizing, get mouse position to reposition fakeRoot
 			if not resizing:
@@ -114,24 +127,29 @@ class ScreenTimelapseApp(tk.Frame):
 				fakeRoot.geometry(f"+{mX - x1}+{mY - y1}")
 				left = mX - x1
 				top = mY - y1
+				screenDPI = self.get_dpi((left, top))
 			else:
 				# Otherwise, resize fakeRoot, minimum is 200x200
-				x2, y2 = mouse.position
-				width = max(200, x2 - left)
-				height = max(200, y2 - top)
+				mX, mY = mouse.position
+				width = max(200, mX - left)
+				height = max(200, mY - top)
 				fakeRoot.geometry(f"{width}x{height}+{left}+{top}")
 				right = left + width
 				bottom = top + height
 
 		def finish():
-			nonlocal x1, y1, x2, y2, left, top, right, bottom
+			nonlocal x1, y1, left, top, right, bottom, screenDPI
 			# Save region data
 			self.regionData["left"] = left
 			self.regionData["top"] = top
 
-			# Width and height must be divisible by 2
-			self.regionData["width"] = (right - left) // 2 * 2
-			self.regionData["height"] = (bottom - top) // 2 * 2
+			# Handle DPI scaling
+			w = (right - left) * (screenDPI / 96.0)
+			h = (bottom - top) * (screenDPI / 96.0)
+
+			# Width and height must be divisible by
+			self.regionData["width"] = int(w - w % 2)
+			self.regionData["height"] = int(h - h % 2)
 
 			print(f"Region set to {self.regionData}")
 
