@@ -19,10 +19,13 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
+
+import ctypes
 import math
-# This script takes screenshots of the screen and creates a timelapse pictures from them.
 import pathlib
 import datetime
+import platform
+import shutil
 import threading
 import subprocess
 import time
@@ -58,65 +61,88 @@ class ScreenTimelapseApp(tk.Frame):
 		self.captureThread = None
 		self.stopEvent = threading.Event()
 		self.directory = None
-		self.camMode = None
 		self.useCamera = False
 		self.cameraSelector = None
+		self.targetCamera = None
 
+		# Set size depending on DPI
+		dpi = self.get_dpi((0, 0))
+		self.master.geometry(f"{int(300 * (dpi / 96.0))}x{int(350 * (dpi / 96.0))}")
+
+		# Font size depending on DPI
+		self.font_size = int(10 * (dpi / 96.0))
+
+		self.stopEvent.set()
 		self.create_widgets()
 
-	def set_cammode(self):
-		self.useCamera = not self.useCamera
-		if self.useCamera:
-			self.cameraSelector["state"] = "normal"
+	def set_cammode(self, camera):
+		if camera == "None - use region":
+			self.useCamera = False
+			self.region["state"] = "normal"
+			if self.regionData["width"] == 0 or self.regionData["height"] == 0:
+				self.startstop["state"] = "disabled"
 		else:
-			self.cameraSelector["state"] = "disabled"
+			self.useCamera = True
+			self.targetCamera = camera
+			self.region["state"] = "disabled"
+			self.startstop["state"] = "normal"
+
+	def get_cameras(self):
+		cameras = ["None - use region"]
+		for i in range(10):
+			try:
+				if iio.imread(f"<video{i}>", index=0) is not None:
+					cameras.append(f"<video{i}>")
+			except:
+				pass
+
+		return cameras
 
 	def create_widgets(self):
-		self.title = tk.Label(self, text=f"py-screen-timelapse v{VERSION}")
-		self.title.pack(side="top")
+		self.title = tk.Label(self, text=f"py-screen-timelapse v{VERSION}", font=("Helvetica", self.font_size))
+		self.title.pack(side="top", pady=10)
 
-		self.camMode = tk.Checkbutton(self, text="Use camera instead", onvalue=True, offvalue=False, command=self.set_cammode)
-		self.camMode.pack(side="top")
-
-		self.cameraSelector = tk.Entry(self)
-		self.cameraSelector.insert(0, "1")
+		cameraList = self.get_cameras()
+		print(f"Found {cameraList} cameras")
+		self.cameraSelector = tk.OptionMenu(self, tk.StringVar(self, cameraList[0]), *cameraList,
+		                                    command=self.set_cammode)
 		self.cameraSelector.pack(side="top")
-		self.cameraSelector["state"] = "disabled"
+		self.cameraSelector.config(font=("Helvetica", self.font_size))
 
-		self.region = tk.Button(self, text="Region", command=self.set_region)
+		self.region = tk.Button(self, text="Region", command=self.set_region, font=("Helvetica", self.font_size))
 		self.region.pack(side="top")
 
-		self.startstop = tk.Button(self, text="Start", command=self.do_start)
-		self.startstop["fg"] = "green"
-
-		# Disable startstop button until region is set
-		#self.startstop["state"] = "disabled"
-		self.startstop.pack(side="top")
-
-		self.spfText = tk.Label(self, text="Capture every n seconds:")
+		self.spfText = tk.Label(self, text="Capture every n seconds:", font=("Helvetica", self.font_size))
 		self.spfText.pack(side="top")
 
 		self.capSPF = tk.Entry(self)
-		self.capSPF.insert(0, "1")	# Seconds per frame
+		self.capSPF.insert(0, "1")  # Seconds per frame
 		self.capSPF.pack(side="top")
 
-		self.outFPSText = tk.Label(self, text="Output FPS:")
+		self.outFPSText = tk.Label(self, text="Output FPS:", font=("Helvetica", self.font_size))
 		self.outFPSText.pack(side="top")
 
 		self.outputFPS = tk.Entry(self)
-		self.outputFPS.insert(0, "60")	# Output FPS
+		self.outputFPS.insert(0, "30")  # Output FPS
 		self.outputFPS.pack(side="top")
 
-		self.capturedFrames = tk.Label(self, text="Captured frames: 0")
-		self.capturedFrames.pack(side="bottom")
+		self.capturedFrames = tk.Label(self, text="Captured frames: 0", font=("Helvetica", self.font_size))
+		self.capturedFrames.pack(side="bottom", pady=10)
 
-		self.quit = tk.Button(self, text="Quit", fg="red", command=self.on_quit)
+		self.startstop = tk.Button(self, text="Start", command=self.do_start, font=("Helvetica", self.font_size))
+		self.startstop["fg"] = "green"
+		# Disable startstop button until region is set
+		self.startstop["state"] = "disabled"
+		self.startstop.pack(side="top")
+
+		self.quit = tk.Button(self, text="Quit", fg="red", command=self.on_quit, font=("Helvetica", self.font_size))
 		self.quit.pack(side="bottom")
 
 	def get_dpi(self, curPos):
 		# Find monitor that has curPos
 		for monitor in screeninfo.get_monitors():
-			if monitor.x <= curPos[0] <= monitor.x + monitor.width and monitor.y <= curPos[1] <= monitor.y + monitor.height:
+			if monitor.x <= curPos[0] <= monitor.x + monitor.width and monitor.y <= curPos[
+				1] <= monitor.y + monitor.height:
 				widthInches = monitor.width_mm / 25.4
 				heightInches = monitor.height_mm / 25.4
 				return (math.hypot(monitor.width, monitor.height) / math.hypot(widthInches, heightInches)) / 1.5
@@ -223,15 +249,13 @@ class ScreenTimelapseApp(tk.Frame):
 		fakeRoot.mainloop()
 
 	def do_start(self):
-		if not self.useCamera and (self.regionData["width"] == 0 or self.regionData["height"] == 0
-								   or self.regionData["left"] == 0 or self.regionData["top"] == 0):
+		if not self.useCamera and (self.regionData["width"] == 0 or self.regionData["height"] == 0):
 			return
 
 		# If invalid inputs for seconds per frame or output FPS, return
-		targetSPF, targetCam = 0, 1
+		targetSPF = 0
 		try:
 			targetSPF = float(self.capSPF.get())
-			targetCam = int(self.cameraSelector.get())
 		except ValueError:
 			return
 
@@ -247,7 +271,6 @@ class ScreenTimelapseApp(tk.Frame):
 		self.capSPF["state"] = "disabled"
 		self.outputFPS["state"] = "disabled"
 		self.cameraSelector["state"] = "disabled"
-		self.camMode["state"] = "disabled"
 
 		# Create new directory with current date under "./timelapses/" and start capturing
 		self.directory = pathlib.Path("timelapses") / datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -273,18 +296,23 @@ class ScreenTimelapseApp(tk.Frame):
 						# Sleep for specified seconds per frame
 						time.sleep(targetSPF)
 			else:
-				for f in iio.imiter(f"<video{targetCam}>"):
-					if self.stopEvent.is_set():
-						return
+				try:
+					for f in iio.imiter(self.targetCamera):
+						if self.stopEvent.is_set():
+							break
 
-					img = Image.fromarray(f)
+						img = Image.fromarray(f)
 
-					img.save(self.directory / f"{frame:06d}.png")
-					frame += 1
+						img.save(self.directory / f"{frame:06d}.png")
+						frame += 1
 
-					self.capturedFrames["text"] = f"Captured frames: {frame}"
+						self.capturedFrames["text"] = f"Captured frames: {frame}"
 
-					time.sleep(targetSPF)
+						time.sleep(targetSPF)
+				except Exception as e:
+					print(e)
+					self.do_stop()
+			return
 
 		# Create capture thread
 		self.captureThread = threading.Thread(target=capture_loop, daemon=True)
@@ -296,7 +324,7 @@ class ScreenTimelapseApp(tk.Frame):
 		# Stop capturing
 		self.stopEvent.set()
 		if self.captureThread.is_alive():
-			self.captureThread.join(timeout=3)
+			self.captureThread.join(timeout=1)
 		else:
 			print("Capture thread is not alive, we are good!")
 
@@ -305,17 +333,24 @@ class ScreenTimelapseApp(tk.Frame):
 		self.startstop["command"] = self.do_start
 		self.startstop["fg"] = "green"
 
-		# Enable region button
-		self.region["state"] = "normal"
+		# Enable region button if not in camera mode
+		if not self.useCamera:
+			self.region["state"] = "normal"
 
 		# Enable spf and fps entries
 		self.capSPF["state"] = "normal"
 		self.outputFPS["state"] = "normal"
 		self.cameraSelector["state"] = "normal"
-		self.camMode["state"] = "normal"
 
-		# Get FFMPEG from package
-		ffmpeg, ffprobe = run.get_or_fetch_platform_executables_else_raise()
+		# Find system FFMPEG
+		if platform.system() == "Windows":
+			ffmpeg = "ffmpeg.exe"
+		else:
+			ffmpeg = "ffmpeg"
+
+		if not shutil.which(ffmpeg):
+			print("FFMPEG not found, trying to download it")
+			ffmpeg, _ = run.get_or_fetch_platform_executables_else_raise()
 
 		# Create video from images
 		print("Creating video...")
@@ -329,7 +364,7 @@ class ScreenTimelapseApp(tk.Frame):
 				ffmpeg,
 				"-y",  # Overwrite output file if it exists
 				"-r", str(int(self.outputFPS.get())),  # Set video rate
-				"-f", "image2pipe",	 # Input format
+				"-f", "image2pipe",  # Input format
 				"-i", "-",  # Input from stdin
 				"-frames:v", str(len(images)),  # Set number of frames
 				"-c:v", "libx264",  # Video codec
@@ -361,6 +396,10 @@ class ScreenTimelapseApp(tk.Frame):
 
 
 if __name__ == "__main__":
+	if platform.system() == "Windows":
+		# Set DPI awareness to Per Monitor V2
+		ctypes.windll.shcore.SetProcessDpiAwareness(2)
+
 	root = tk.Tk()
 	app = ScreenTimelapseApp(master=root)
 	app.mainloop()
