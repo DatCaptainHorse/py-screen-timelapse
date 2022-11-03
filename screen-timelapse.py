@@ -27,6 +27,7 @@ import threading
 import subprocess
 import time
 
+import imageio.v3 as iio
 import screeninfo
 from mss import mss
 import tkinter as tk
@@ -34,7 +35,7 @@ from PIL import Image
 from static_ffmpeg import run
 from pynput.mouse import Controller
 
-VERSION = "0.1.2"
+VERSION = "0.1.4"
 
 
 class ScreenTimelapseApp(tk.Frame):
@@ -57,34 +58,53 @@ class ScreenTimelapseApp(tk.Frame):
 		self.captureThread = None
 		self.stopEvent = threading.Event()
 		self.directory = None
+		self.camMode = None
+		self.useCamera = False
+		self.cameraSelector = None
 
 		self.create_widgets()
+
+	def set_cammode(self):
+		self.useCamera = not self.useCamera
+		if self.useCamera:
+			self.cameraSelector["state"] = "normal"
+		else:
+			self.cameraSelector["state"] = "disabled"
 
 	def create_widgets(self):
 		self.title = tk.Label(self, text=f"py-screen-timelapse v{VERSION}")
 		self.title.pack(side="top")
+
+		self.camMode = tk.Checkbutton(self, text="Use camera instead", onvalue=True, offvalue=False, command=self.set_cammode)
+		self.camMode.pack(side="top")
+
+		self.cameraSelector = tk.Entry(self)
+		self.cameraSelector.insert(0, "1")
+		self.cameraSelector.pack(side="top")
+		self.cameraSelector["state"] = "disabled"
 
 		self.region = tk.Button(self, text="Region", command=self.set_region)
 		self.region.pack(side="top")
 
 		self.startstop = tk.Button(self, text="Start", command=self.do_start)
 		self.startstop["fg"] = "green"
+
 		# Disable startstop button until region is set
-		self.startstop["state"] = "disabled"
+		#self.startstop["state"] = "disabled"
 		self.startstop.pack(side="top")
 
 		self.spfText = tk.Label(self, text="Capture every n seconds:")
 		self.spfText.pack(side="top")
 
 		self.capSPF = tk.Entry(self)
-		self.capSPF.insert(0, "1")  # Seconds per frame
+		self.capSPF.insert(0, "1")	# Seconds per frame
 		self.capSPF.pack(side="top")
 
 		self.outFPSText = tk.Label(self, text="Output FPS:")
 		self.outFPSText.pack(side="top")
 
 		self.outputFPS = tk.Entry(self)
-		self.outputFPS.insert(0, "60")  # Output FPS
+		self.outputFPS.insert(0, "60")	# Output FPS
 		self.outputFPS.pack(side="top")
 
 		self.capturedFrames = tk.Label(self, text="Captured frames: 0")
@@ -203,15 +223,15 @@ class ScreenTimelapseApp(tk.Frame):
 		fakeRoot.mainloop()
 
 	def do_start(self):
-		if self.regionData["width"] == 0 or self.regionData["height"] == 0\
-				or self.regionData["left"] == 0 or self.regionData["top"] == 0:
+		if not self.useCamera and (self.regionData["width"] == 0 or self.regionData["height"] == 0
+								   or self.regionData["left"] == 0 or self.regionData["top"] == 0):
 			return
 
 		# If invalid inputs for seconds per frame or output FPS, return
-		targetSPF, targetFPS = 0, 0
+		targetSPF, targetCam = 0, 1
 		try:
 			targetSPF = float(self.capSPF.get())
-			targetFPS = int(self.outputFPS.get())
+			targetCam = int(self.cameraSelector.get())
 		except ValueError:
 			return
 
@@ -226,6 +246,8 @@ class ScreenTimelapseApp(tk.Frame):
 		# Disable spf and fps entries
 		self.capSPF["state"] = "disabled"
 		self.outputFPS["state"] = "disabled"
+		self.cameraSelector["state"] = "disabled"
+		self.camMode["state"] = "disabled"
 
 		# Create new directory with current date under "./timelapses/" and start capturing
 		self.directory = pathlib.Path("timelapses") / datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -233,33 +255,50 @@ class ScreenTimelapseApp(tk.Frame):
 
 		def capture_loop():
 			frame = 0
-			with mss() as sct:
-				while self.stopEvent.is_set():
-					sct_img = sct.grab(self.regionData)
+			if not self.useCamera:
+				with mss() as sct:
+					while not self.stopEvent.is_set():
+						sct_img = sct.grab(self.regionData)
 
-					# Convert to PIL Image
-					img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
+						# Convert to PIL Image
+						img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
 
-					# Save image (number of frame as filename, padded with 6 zeros)
+						# Save image (number of frame as filename, padded with 6 zeros)
+						img.save(self.directory / f"{frame:06d}.png")
+						frame += 1
+
+						# Update capturedFrames label
+						self.capturedFrames["text"] = f"Captured frames: {frame}"
+
+						# Sleep for specified seconds per frame
+						time.sleep(targetSPF)
+			else:
+				for f in iio.imiter(f"<video{targetCam}>"):
+					if self.stopEvent.is_set():
+						return
+
+					img = Image.fromarray(f)
+
 					img.save(self.directory / f"{frame:06d}.png")
 					frame += 1
 
-					# Update capturedFrames label
 					self.capturedFrames["text"] = f"Captured frames: {frame}"
 
-					# Sleep for specified seconds per frame
 					time.sleep(targetSPF)
 
 		# Create capture thread
-		self.captureThread = threading.Thread(target=capture_loop)
+		self.captureThread = threading.Thread(target=capture_loop, daemon=True)
 		print("Starting capture thread")
-		self.stopEvent.set()
+		self.stopEvent.clear()
 		self.captureThread.start()
 
 	def do_stop(self):
 		# Stop capturing
-		self.stopEvent.clear()
-		self.captureThread.join()
+		self.stopEvent.set()
+		if self.captureThread.is_alive():
+			self.captureThread.join(timeout=3)
+		else:
+			print("Capture thread is not alive, we are good!")
 
 		# Change startstop button to start
 		self.startstop["text"] = "Start"
@@ -272,6 +311,8 @@ class ScreenTimelapseApp(tk.Frame):
 		# Enable spf and fps entries
 		self.capSPF["state"] = "normal"
 		self.outputFPS["state"] = "normal"
+		self.cameraSelector["state"] = "normal"
+		self.camMode["state"] = "normal"
 
 		# Get FFMPEG from package
 		ffmpeg, ffprobe = run.get_or_fetch_platform_executables_else_raise()
@@ -287,9 +328,10 @@ class ScreenTimelapseApp(tk.Frame):
 			[
 				ffmpeg,
 				"-y",  # Overwrite output file if it exists
-				"-framerate", str(self.outputFPS.get()),  # Set framerate, validated at start
-				"-f", "image2pipe",  # Input format
+				"-r", str(int(self.outputFPS.get())),  # Set video rate
+				"-f", "image2pipe",	 # Input format
 				"-i", "-",  # Input from stdin
+				"-frames:v", str(len(images)),  # Set number of frames
 				"-c:v", "libx264",  # Video codec
 				"-pix_fmt", "yuv420p",  # Pixel format
 				"-movflags", "+faststart",  # Fast start
@@ -312,7 +354,7 @@ class ScreenTimelapseApp(tk.Frame):
 		print("Done")
 
 	def on_quit(self):
-		if self.stopEvent.is_set():
+		if not self.stopEvent.is_set():
 			self.do_stop()
 
 		self.master.destroy()
