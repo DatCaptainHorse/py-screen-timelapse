@@ -38,7 +38,7 @@ from PIL import Image
 from static_ffmpeg import run
 from pynput.mouse import Controller
 
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 
 
 class ScreenTimelapseApp(tk.Frame):
@@ -62,15 +62,16 @@ class ScreenTimelapseApp(tk.Frame):
 		self.stopEvent = threading.Event()
 		self.directory = None
 		self.useCamera = False
+		self.camText = None
 		self.cameraSelector = None
 		self.targetCamera = None
 
 		# Set size depending on DPI
 		dpi = self.get_dpi((0, 0))
-		self.master.geometry(f"{int(300 * (dpi / 96.0))}x{int(350 * (dpi / 96.0))}")
+		self.master.geometry(f"{int(400 * (dpi / 96.0))}x{int(450 * (dpi / 96.0))}")
 
 		# Font size depending on DPI
-		self.font_size = int(10 * (dpi / 96.0))
+		self.font_size = int(14 * (dpi / 96.0))
 
 		self.stopEvent.set()
 		self.create_widgets()
@@ -102,15 +103,18 @@ class ScreenTimelapseApp(tk.Frame):
 		self.title = tk.Label(self, text=f"py-screen-timelapse v{VERSION}", font=("Helvetica", self.font_size))
 		self.title.pack(side="top", pady=10)
 
-		cameraList = self.get_cameras()
+		self.camText = tk.Label(self, text="Device to use (webcam):", font=("Helvetica", self.font_size))
+		self.camText.pack(side="top")
+
+		cameraList = self.get_cameras()  # Make async
 		print(f"Found {cameraList} cameras")
 		self.cameraSelector = tk.OptionMenu(self, tk.StringVar(self, cameraList[0]), *cameraList,
 		                                    command=self.set_cammode)
 		self.cameraSelector.pack(side="top")
 		self.cameraSelector.config(font=("Helvetica", self.font_size))
 
-		self.region = tk.Button(self, text="Region", command=self.set_region, font=("Helvetica", self.font_size))
-		self.region.pack(side="top")
+		self.region = tk.Button(self, text="Set Region", command=self.set_region, font=("Helvetica", self.font_size))
+		self.region.pack(side="top", pady=10)
 
 		self.spfText = tk.Label(self, text="Capture every n seconds:", font=("Helvetica", self.font_size))
 		self.spfText.pack(side="top")
@@ -133,7 +137,7 @@ class ScreenTimelapseApp(tk.Frame):
 		self.startstop["fg"] = "green"
 		# Disable startstop button until region is set
 		self.startstop["state"] = "disabled"
-		self.startstop.pack(side="top")
+		self.startstop.pack(side="top", pady=10)
 
 		self.quit = tk.Button(self, text="Quit", fg="red", command=self.on_quit, font=("Helvetica", self.font_size))
 		self.quit.pack(side="bottom")
