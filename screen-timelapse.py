@@ -38,7 +38,7 @@ from PIL import Image
 from static_ffmpeg import run
 from pynput.mouse import Controller
 
-VERSION = "0.1.5"
+VERSION = "0.1.6"
 
 
 class ScreenTimelapseApp(tk.Frame):
@@ -60,15 +60,21 @@ class ScreenTimelapseApp(tk.Frame):
 		self.regionData = {"top": 0, "left": 0, "width": 0, "height": 0}
 		self.captureThread = None
 		self.stopEvent = threading.Event()
+		self.stopperThread = None
 		self.directory = None
 		self.useCamera = False
 		self.camText = None
 		self.cameraSelector = None
 		self.targetCamera = None
+		self.capDurFrame = None
+		self.capDurHour = None
+		self.capDurMin = None
+		self.capDurText = None
+		self.capDurRemaining = None
 
 		# Set size depending on DPI
 		dpi = self.get_dpi((0, 0))
-		self.master.geometry(f"{int(400 * (dpi / 96.0))}x{int(450 * (dpi / 96.0))}")
+		self.master.geometry(f"{int(400 * (dpi / 96.0))}x{int(600 * (dpi / 96.0))}")
 
 		# Font size depending on DPI
 		self.font_size = int(14 * (dpi / 96.0))
@@ -109,7 +115,7 @@ class ScreenTimelapseApp(tk.Frame):
 		cameraList = self.get_cameras()  # Make async
 		print(f"Found {cameraList} cameras")
 		self.cameraSelector = tk.OptionMenu(self, tk.StringVar(self, cameraList[0]), *cameraList,
-		                                    command=self.set_cammode)
+											command=self.set_cammode)
 		self.cameraSelector.pack(side="top")
 		self.cameraSelector.config(font=("Helvetica", self.font_size))
 
@@ -130,6 +136,24 @@ class ScreenTimelapseApp(tk.Frame):
 		self.outputFPS.insert(0, "30")  # Output FPS
 		self.outputFPS.pack(side="top")
 
+		self.capDurText = tk.Label(self, text="Capture duration in hours and minutes:\n(-1 in either box to disable)", font=("Helvetica", self.font_size))
+		self.capDurText.pack(side="top")
+
+		# Hour and minute capture duration boxes
+		self.capDurFrame = tk.Frame(self)
+		self.capDurFrame.pack(side="top")
+
+		self.capDurHour = tk.Entry(self.capDurFrame)
+		self.capDurHour.insert(0, "-1")  # Hours
+		self.capDurHour.pack(side="left")
+
+		self.capDurMin = tk.Entry(self.capDurFrame)
+		self.capDurMin.insert(0, "-1")  # Minutes
+		self.capDurMin.pack(side="left")
+
+		self.capDurRemaining = tk.Label(self, text="Duration remaining: Until stopped", font=("Helvetica", self.font_size))
+		self.capDurRemaining.pack(side="bottom")
+
 		self.capturedFrames = tk.Label(self, text="Captured frames: 0", font=("Helvetica", self.font_size))
 		self.capturedFrames.pack(side="bottom", pady=10)
 
@@ -147,8 +171,13 @@ class ScreenTimelapseApp(tk.Frame):
 		for monitor in screeninfo.get_monitors():
 			if monitor.x <= curPos[0] <= monitor.x + monitor.width and monitor.y <= curPos[
 				1] <= monitor.y + monitor.height:
-				widthInches = monitor.width_mm / 25.4
-				heightInches = monitor.height_mm / 25.4
+				if monitor.width_mm is not None and monitor.height_mm is not None:
+					widthInches = monitor.width_mm / 25.4
+					heightInches = monitor.height_mm / 25.4
+				else:
+					widthInches = monitor.width / 96.0
+					heightInches = monitor.height / 96.0
+
 				return (math.hypot(monitor.width, monitor.height) / math.hypot(widthInches, heightInches)) / 1.5
 
 	def set_region(self):
@@ -263,6 +292,19 @@ class ScreenTimelapseApp(tk.Frame):
 		except ValueError:
 			return
 
+		captureDuration = 0
+		try:
+			hours = int(self.capDurHour.get())
+			minutes = int(self.capDurMin.get())
+			if hours > 0 and minutes > 0:
+				captureDuration = (hours * 3600) + (minutes * 60)
+			elif hours > 0:
+				captureDuration = hours * 3600
+			elif minutes > 0:
+				captureDuration = minutes * 60
+		except ValueError:
+			return
+
 		# Change startstop button to stop
 		self.startstop["text"] = "Stop"
 		self.startstop["command"] = self.do_stop
@@ -315,7 +357,7 @@ class ScreenTimelapseApp(tk.Frame):
 						time.sleep(targetSPF)
 				except Exception as e:
 					print(e)
-					self.do_stop()
+					return
 			return
 
 		# Create capture thread
@@ -324,6 +366,25 @@ class ScreenTimelapseApp(tk.Frame):
 		self.stopEvent.clear()
 		self.captureThread.start()
 
+		# Stopper thread function which waits for captureDuration seconds and then calls do_stop
+		def stopper_loop():
+			startTime = time.time()
+			while not self.stopEvent.is_set():
+				if time.time() - startTime >= captureDuration:
+					self.do_stop()
+					return
+
+				# Duration text in hh:mm:ss
+				delta = captureDuration - (time.time() - startTime)
+				self.capDurRemaining["text"] = f"Duration remaining: {int(delta // 3600):02d}:{int((delta % 3600) // 60):02d}:{int(delta % 60):02d}"
+				time.sleep(0.1)
+
+		# Create stopper thread
+		if captureDuration > 0:
+			self.stopperThread = threading.Thread(target=stopper_loop, daemon=True)
+			print("Starting stopper thread")
+			self.stopperThread.start()
+
 	def do_stop(self):
 		# Stop capturing
 		self.stopEvent.set()
@@ -331,6 +392,9 @@ class ScreenTimelapseApp(tk.Frame):
 			self.captureThread.join(timeout=1)
 		else:
 			print("Capture thread is not alive, we are good!")
+
+		# Reset duration text
+		self.capDurRemaining["text"] = "Duration remaining: Until stopped"
 
 		# Change startstop button to start
 		self.startstop["text"] = "Start"
